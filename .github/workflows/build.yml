@@ -111,7 +111,14 @@ jobs:
       - name: Clone SUSFS4KSU
         working-directory: kernel_workspace
         run: |
+          # WildKernels maintains a fork of susfs4ksu that stays synced with
+          # simonpunk's upstream AND carries extra compatibility fixes for
+          # each GKI branch (the same source WildKernels/GKI_KernelSU_SUSFS
+          # itself builds from) — this is why it applies cleaner than the
+          # raw upstream repo on some KMI sub-versions.
           git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
+            https://github.com/WildKernels/susfs4ksu.git susfs4ksu \
+          || git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
             https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
 
       - name: Apply SUSFS to kernel + KernelSU-Next
@@ -229,6 +236,28 @@ jobs:
             echo "$cfg" >> "$DEFCONFIG"
           done
           echo "::notice::Tweaks are conservative defaults — remove any line above if your device tree doesn't support it (e.g. CONFIG_SCHED_WALT is SoC-dependent)."
+
+      # ---------------------------------------------------------------------
+      # 7b. Disable the strict defconfig verification
+      #
+      # GKI's build.config.gki sets POST_DEFCONFIG_CMDS="check_defconfig",
+      # which runs `make savedefconfig` after defconfig and FAILS the build
+      # if the result isn't byte-for-byte identical to the checked-in
+      # gki_defconfig (Google's reproducibility check for their own CI).
+      # Any config we add on top — KSU, SUSFS, BBRplus, gaming tweaks — is
+      # by definition a deviation from stock, so this check must always be
+      # disabled for any customized GKI build. This is the actual cause of
+      # "ERROR: savedefconfig does not match .../gki_defconfig".
+      # ---------------------------------------------------------------------
+      - name: Disable strict defconfig verification
+        working-directory: kernel_workspace
+        run: |
+          for f in common/build.config.gki common/build.config.gki.aarch64; do
+            if [ -f "$f" ]; then
+              sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
+              grep -n "POST_DEFCONFIG_CMDS" "$f" || true
+            fi
+          done
 
       # ---------------------------------------------------------------------
       # 8. Build
