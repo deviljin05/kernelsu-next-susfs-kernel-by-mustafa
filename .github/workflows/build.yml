@@ -1,0 +1,266 @@
+name: Build GKI android12-5.10 (KernelSU-Next + SUSFS + BBRplus)
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_BRANCH:
+        description: "ACK manifest branch (adjust if your KMI sub-version differs)"
+        required: true
+        default: "common-android12-5.10-lts"
+      SUSFS_BRANCH:
+        description: "SUSFS4KSU branch matching your KMI"
+        required: true
+        default: "gki-android12-5.10"
+      KSU_BRANCH:
+        description: "KernelSU-Next branch"
+        required: true
+        default: "next-susfs"
+      ENABLE_BBRPLUS:
+        description: "Apply BBRplus patch"
+        required: true
+        default: "true"
+      ENABLE_KPM:
+        description: "Enable KPM (SukiSU-style kernel patch module, optional)"
+        required: true
+        default: "false"
+
+env:
+  CCACHE_DIR: /home/runner/.ccache
+  KBUILD_BUILD_USER: "builder"
+  KBUILD_BUILD_HOST: "gh-actions"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      # ---------------------------------------------------------------------
+      # 1. Free disk space (GKI builds are large; default runner disk is tight)
+      # ---------------------------------------------------------------------
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # 2. Install dependencies
+      # ---------------------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl wget build-essential bc bison flex libssl-dev \
+            libelf-dev libncurses5-dev python3 python3-pip python-is-python3 \
+            zip unzip rsync ccache device-tree-compiler \
+            libarchive-tools zstd
+
+          # repo tool
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+          git config --global user.name "gh-actions"
+          git config --global user.email "actions@github.com"
+          git config --global color.ui false
+
+      - name: Setup ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # 3. Sync ACK android12-5.10 source
+      #    NOTE: if you get hunk errors later, first check that this branch
+      #    actually matches your phone's exact KMI (5.10.101 / .110 / .157 / .198)
+      #    Settings > About Phone > Kernel version.
+      # ---------------------------------------------------------------------
+      - name: Sync kernel source (repo init/sync)
+        run: |
+          mkdir -p kernel_workspace && cd kernel_workspace
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b ${{ github.event.inputs.KERNEL_BRANCH }} --depth=1
+          repo sync -j$(nproc --all) --no-tags --no-clone-bundle
+
+      # ---------------------------------------------------------------------
+      # 4. Add KernelSU-Next (susfs-dev flavored branch)
+      # ---------------------------------------------------------------------
+      - name: Add KernelSU-Next
+        working-directory: kernel_workspace
+        run: |
+          cd common
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.KSU_BRANCH }}/kernel/setup.sh" \
+            | bash -s ${{ github.event.inputs.KSU_BRANCH }}
+
+      # ---------------------------------------------------------------------
+      # 5. Apply SUSFS patches
+      # ---------------------------------------------------------------------
+      - name: Clone SUSFS4KSU
+        working-directory: kernel_workspace
+        run: |
+          git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
+            https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+
+      - name: Apply SUSFS to kernel + KernelSU-Next
+        working-directory: kernel_workspace
+        run: |
+          set -e
+          SUSFS_DIR="$(pwd)/susfs4ksu"
+          KERNEL_DIR="$(pwd)/common"
+          KSU_DIR="$(pwd)/KernelSU-Next"
+
+          # copy susfs kernel patch + required lib files
+          cp "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch "$KERNEL_DIR"/ || \
+          cp "$SUSFS_DIR"/kernel_patches/*.patch "$KERNEL_DIR"/ 2>/dev/null || true
+
+          cp "$SUSFS_DIR"/kernel_patches/fs/* "$KERNEL_DIR"/fs/ 2>/dev/null || true
+          cp "$SUSFS_DIR"/kernel_patches/include/linux/* "$KERNEL_DIR"/include/linux/ 2>/dev/null || true
+
+          cd "$KERNEL_DIR"
+          PATCH_FILE=$(ls 50_add_susfs_in_*.patch 2>/dev/null | head -n1)
+          if [ -n "$PATCH_FILE" ]; then
+            patch -p1 --fuzz=3 < "$PATCH_FILE" || {
+              echo "::warning::SUSFS kernel patch had rejects — check *.rej files, likely KMI sub-version mismatch";
+              find . -name "*.rej";
+            }
+          fi
+
+          # apply susfs patch to KernelSU-Next
+          if [ -d "$KSU_DIR" ]; then
+            cd "$KSU_DIR"
+            SUSFS_KSU_PATCH=$(ls "$SUSFS_DIR"/kernel_patches/KernelSU/*.patch 2>/dev/null | head -n1)
+            if [ -n "$SUSFS_KSU_PATCH" ]; then
+              patch -p1 --fuzz=3 < "$SUSFS_KSU_PATCH" || {
+                echo "::warning::SUSFS KernelSU-Next patch had rejects — check *.rej files";
+                find . -name "*.rej";
+              }
+            fi
+          fi
+
+      - name: Enable SUSFS config flags
+        working-directory: kernel_workspace/common
+        run: |
+          DEFCONFIG=arch/arm64/configs/gki_defconfig
+          for cfg in \
+            CONFIG_KSU=y \
+            CONFIG_KSU_SUSFS=y \
+            CONFIG_KSU_SUSFS_SUS_PATH=y \
+            CONFIG_KSU_SUSFS_SUS_MOUNT=y \
+            CONFIG_KSU_SUSFS_SUS_KSTAT=y \
+            CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n \
+            CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
+            CONFIG_KSU_SUSFS_SPOOF_UNAME=y \
+            CONFIG_KSU_SUSFS_ENABLE_LOG=y \
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y \
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT=y \
+            CONFIG_TMPFS_XATTR=y \
+            CONFIG_TMPFS_POSIX_ACL=y
+          do
+            key="${cfg%%=*}"
+            sed -i "/^${key}=/d" "$DEFCONFIG" 2>/dev/null || true
+            echo "$cfg" >> "$DEFCONFIG"
+          done
+
+      # ---------------------------------------------------------------------
+      # 6. BBRplus (gaming/network optimization — better throughput under loss)
+      # ---------------------------------------------------------------------
+      - name: Apply BBRplus patch
+        if: ${{ github.event.inputs.ENABLE_BBRPLUS == 'true' }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -e
+          curl -LSs -o /tmp/bbrplus.patch \
+            "https://raw.githubusercontent.com/Kuroneko-lab/kernel_patches/main/bbrplus/bbrplus-5.10.patch" \
+            || echo "::warning::Default BBRplus patch URL unreachable — replace with a patch matching your exact 5.10.x subversion"
+          if [ -s /tmp/bbrplus.patch ]; then
+            patch -p1 --fuzz=3 < /tmp/bbrplus.patch || {
+              echo "::warning::BBRplus patch had rejects — check *.rej files, may need manual hunk fix for your KMI";
+              find . -name "*.rej";
+            }
+          fi
+
+          DEFCONFIG=arch/arm64/configs/gki_defconfig
+          for cfg in \
+            CONFIG_TCP_CONG_ADVANCED=y \
+            CONFIG_TCP_CONG_BBRPLUS=y \
+            CONFIG_DEFAULT_BBRPLUS=y \
+            CONFIG_DEFAULT_TCP_CONG=bbrplus \
+            CONFIG_NET_SCH_FQ=y \
+            CONFIG_NET_SCH_FQ_CODEL=y
+          do
+            key="${cfg%%=*}"
+            sed -i "/^${key}=/d" "$DEFCONFIG" 2>/dev/null || true
+            echo "$cfg" >> "$DEFCONFIG"
+          done
+
+      # ---------------------------------------------------------------------
+      # 7. Gaming / performance oriented tweaks (safe generic set)
+      # ---------------------------------------------------------------------
+      - name: Apply gaming/perf defconfig tweaks
+        working-directory: kernel_workspace/common
+        run: |
+          DEFCONFIG=arch/arm64/configs/gki_defconfig
+          for cfg in \
+            CONFIG_HZ_300=y \
+            CONFIG_HZ=300 \
+            CONFIG_NO_HZ_FULL=y \
+            CONFIG_SCHED_WALT=y \
+            CONFIG_SCHED_AUTOGROUP=y \
+            CONFIG_ZSMALLOC=y \
+            CONFIG_ZRAM=y \
+            CONFIG_ZRAM_DEF_COMP_LZ4=y
+          do
+            key="${cfg%%=*}"
+            sed -i "/^${key}=/d" "$DEFCONFIG" 2>/dev/null || true
+            echo "$cfg" >> "$DEFCONFIG"
+          done
+          echo "::notice::Tweaks are conservative defaults — remove any line above if your device tree doesn't support it (e.g. CONFIG_SCHED_WALT is SoC-dependent)."
+
+      # ---------------------------------------------------------------------
+      # 8. Build
+      # ---------------------------------------------------------------------
+      - name: Build kernel
+        working-directory: kernel_workspace
+        run: |
+          set -e
+          export KBUILD_BUILD_USER KBUILD_BUILD_HOST
+          if [ -f build/build.sh ]; then
+            LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
+          else
+            tools/bazel run --config=fast --config=stamp \
+              //common:kernel_aarch64_dist -- --dist_dir=out/dist
+          fi
+
+      # ---------------------------------------------------------------------
+      # 9. Package with AnyKernel3
+      # ---------------------------------------------------------------------
+      - name: Clone AnyKernel3
+        run: git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
+
+      - name: Package flashable zip
+        run: |
+          set -e
+          IMG=$(find kernel_workspace -name "Image" -o -name "Image.gz" | head -n1)
+          if [ -z "$IMG" ]; then
+            echo "::error::No kernel Image found — build likely failed above"; exit 1
+          fi
+          cp "$IMG" anykernel3/
+          cd anykernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
+          zip -r9 ../KernelSU-Next-SUSFS-BBRplus-android12-5.10.zip . -x ".git*" "README.md"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GKI-android12-5.10-KSUNext-SUSFS-BBRplus
+          path: KernelSU-Next-SUSFS-BBRplus-android12-5.10.zip
+          retention-days: 14
