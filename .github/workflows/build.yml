@@ -1,4 +1,4 @@
-name: Single File GKI KernelSU-Next + SUSFS + WildKernels Build
+name: GKI KernelSU-Next + SUSFS + WildKernels Build
 
 on:
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
 
-      # Step 2: Dependencies
+      # Step 2: Install Build Dependencies
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -61,7 +61,13 @@ jobs:
           git config --global user.email "actions@github.com"
           git config --global color.ui false
 
-      # Step 3: Source Sync
+      # Step 3: Setup ccache
+      - name: Setup ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
+
+      # Step 4: Sync Kernel Source
       - name: Sync kernel source
         run: |
           mkdir -p kernel_workspace && cd kernel_workspace
@@ -69,7 +75,7 @@ jobs:
             -b ${{ github.event.inputs.KERNEL_BRANCH }} --depth=1
           repo sync -j$(nproc --all) --no-tags --no-clone-bundle
 
-      # Step 4: Add KernelSU-Next
+      # Step 5: Add KernelSU-Next
       - name: Add KernelSU-Next
         working-directory: kernel_workspace
         run: |
@@ -78,29 +84,34 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s ${{ github.event.inputs.KSU_BRANCH }}
 
-      # Step 5: Clone SUSFS and WildKernels Fixes
+      # Step 6: Safe Clone Patch Repositories
       - name: Clone Patch Repositories
         working-directory: kernel_workspace
+        env:
+          GIT_TERMINAL_PROMPT: 0
         run: |
           git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
             https://github.com/WildKernels/susfs4ksu.git susfs4ksu \
           || git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
-            https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+            https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu \
+          || echo "::warning::Failed to clone susfs4ksu repo"
 
           git clone --depth=1 https://github.com/WildKernels/kernel_patches.git wk_patches || true
 
-          cd susfs4ksu
-          echo "SUSFS_BRANCH=${{ github.event.inputs.SUSFS_BRANCH }}" >> "$GITHUB_ENV"
-          echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          if [ -d "susfs4ksu" ]; then
+            cd susfs4ksu
+            echo "SUSFS_BRANCH=${{ github.event.inputs.SUSFS_BRANCH }}" >> "$GITHUB_ENV"
+            echo "SUSFS_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo 'unknown')" >> "$GITHUB_ENV"
+          fi
 
-      # Step 6: Detect Kernel Sublevel
+      # Step 7: Detect Kernel Sublevel
       - name: Detect kernel sublevel
         working-directory: kernel_workspace
         run: |
           SUBLEVEL=$(grep -m1 '^SUBLEVEL' common/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]')
           echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
 
-      # Step 7: Apply Pre-SUSFS Workarounds
+      # Step 8: Apply Temporary Fake Patches (Pre-SUSFS)
       - name: Apply temporary fake patches
         working-directory: kernel_workspace/common
         if: contains(github.event.inputs.KERNEL_BRANCH, 'android12-5.10')
@@ -114,7 +125,7 @@ jobs:
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
 
-      # Step 8: Apply ALL Patches (SUSFS + WildKernels)
+      # Step 9: Apply ALL Patches (Correct Directories)
       - name: Apply ALL SUSFS & WildKernels Patches
         working-directory: kernel_workspace
         run: |
@@ -123,35 +134,38 @@ jobs:
           KSU_DIR="$(pwd)/KernelSU-Next"
           [ ! -d "$KSU_DIR" ] && KSU_DIR="$(pwd)/common/drivers/kernelsu"
 
+          # Helper function for directory patch execution
           apply_patch_folder() {
             local src_dir="$1"
             local target_dir="$2"
             if [ -d "$src_dir" ] && [ -d "$target_dir" ]; then
               cd "$target_dir"
-              for patch_file in "$src_dir"/*.patch "$src_dir"/*/*.patch; do
+              for patch_file in "$src_dir"/*.patch; do
                 if [ -f "$patch_file" ]; then
-                  echo "Applying: $(basename "$patch_file") to $(basename "$target_dir")"
+                  echo "===> Applying $(basename "$patch_file") to $(basename "$target_dir")..."
                   patch -p1 --fuzz=3 --forward < "$patch_file" || echo "::warning::Skipped/Failed: $(basename "$patch_file")"
                 fi
               done
             fi
           }
 
-          # Apply SUSFS Base Patches
+          # 1. Apply Base Kernel SUSFS Patches to KERNEL_DIR
           apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches" "$KERNEL_DIR"
+
+          # 2. Apply KernelSU SUSFS Patches explicitly inside KSU_DIR
           apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches/KernelSU" "$KSU_DIR"
 
-          # Apply WildKernels Fixes
+          # 3. Apply WildKernels Fixes
           apply_patch_folder "$(pwd)/wk_patches/common" "$KERNEL_DIR"
           apply_patch_folder "$(pwd)/wk_patches/next" "$KSU_DIR"
           apply_patch_folder "$(pwd)/wk_patches/ksu" "$KSU_DIR"
-          
+
           SUSFS_FIX_DIR=$(find "$(pwd)/wk_patches" -type d -name "susfs_fix_patches" 2>/dev/null | head -n1)
           [ -n "$SUSFS_FIX_DIR" ] && apply_patch_folder "$SUSFS_FIX_DIR" "$KERNEL_DIR"
 
           set -e
 
-      # Step 9: Revert Pre-SUSFS Workarounds
+      # Step 10: Revert Temporary Fake Patches (Post-SUSFS)
       - name: Revert temporary fake patches
         working-directory: kernel_workspace/common
         if: contains(github.event.inputs.KERNEL_BRANCH, 'android12-5.10')
@@ -165,13 +179,17 @@ jobs:
             perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
           fi
 
-      # Step 10: Configure Defconfig
+          if [ "${SUBLEVEL}" -le "209" ]; then
+            sed -i -e 's/goto show_pad;/return 0;/' fs/proc/task_mmu.c
+          fi
+
+      # Step 11: Configure Defconfig Flags
       - name: Inject Defconfig Flags (SUSFS + BBRplus)
         working-directory: kernel_workspace/common
         run: |
           DEFCONFIG=arch/arm64/configs/gki_defconfig
           
-          # SUSFS Flags
+          # SUSFS Configs
           for cfg in \
             CONFIG_KSU=y CONFIG_KSU_SUSFS=y CONFIG_KSU_SUSFS_SUS_PATH=y \
             CONFIG_KSU_SUSFS_SUS_MOUNT=y CONFIG_KSU_SUSFS_SUS_KSTAT=y \
@@ -186,15 +204,19 @@ jobs:
             echo "$cfg" >> "$DEFCONFIG"
           done
 
-          # Optional BBRplus Flags
+          # BBRplus Configs
           if [ "${{ github.event.inputs.ENABLE_BBRPLUS }}" = "true" ]; then
-            for cfg in CONFIG_TCP_CONG_ADVANCED=y CONFIG_TCP_CONG_BBRPLUS=y CONFIG_DEFAULT_BBRPLUS=y CONFIG_DEFAULT_TCP_CONG=bbrplus; do
+            curl -LSs -o /tmp/bbrplus.patch "https://raw.githubusercontent.com/Kuroneko-lab/kernel_patches/main/bbrplus/bbrplus-5.10.patch" || true
+            if [ -s /tmp/bbrplus.patch ]; then
+              patch -p1 --fuzz=3 < /tmp/bbrplus.patch || echo "::warning::BBRplus patch skipped"
+            fi
+            for cfg in CONFIG_TCP_CONG_ADVANCED=y CONFIG_TCP_CONG_BBRPLUS=y CONFIG_DEFAULT_BBRPLUS=y CONFIG_DEFAULT_TCP_CONG=bbrplus CONFIG_NET_SCH_FQ=y CONFIG_NET_SCH_FQ_CODEL=y; do
               sed -i "/^${cfg%%=*}=/d" "$DEFCONFIG" 2>/dev/null || true
               echo "$cfg" >> "$DEFCONFIG"
             done
           fi
 
-      # Step 11: Disable Defconfig Checks
+      # Step 12: Disable Strict Defconfig Checks
       - name: Disable strict defconfig checks
         working-directory: kernel_workspace
         run: |
@@ -202,7 +224,7 @@ jobs:
             [ -f "$f" ] && sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
           done
 
-      # Step 12: Build Kernel
+      # Step 13: Compile Kernel
       - name: Build Kernel
         working-directory: kernel_workspace
         run: |
@@ -214,11 +236,14 @@ jobs:
             tools/bazel run --config=fast --config=stamp //common:kernel_aarch64_dist -- --dist_dir=out/dist
           fi
 
-      # Step 13: Package Artifact
+      # Step 14: Package Zip with AnyKernel3
       - name: Package AnyKernel3 Zip
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           IMG=$(find kernel_workspace -name "Image" -o -name "Image.gz" | head -n1)
+          if [ -z "$IMG" ]; then
+            echo "::error::Image file not found!" && exit 1
+          fi
           cp "$IMG" anykernel3/
           cd anykernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
@@ -227,9 +252,10 @@ jobs:
           zip -r9 "../${OUT_NAME}" . -x ".git*"
           echo "OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
 
-      # Step 14: Upload Artifact
+      # Step 15: Upload Build Artifact
       - name: Upload Flashable Zip
         uses: actions/upload-artifact@v4
         with:
           name: GKI-KernelSU-Next-SUSFS-Build
           path: ${{ env.OUT_NAME }}
+          retention-days: 14
