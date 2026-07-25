@@ -235,12 +235,21 @@ jobs:
             echo "::notice::Added tcp_bic, tcp_westwood, and tcp_htcp to gki_aarch64_modules list."
           fi
 
-      # Step 13: Compile Kernel
+      # Step 13: Compile Kernel (Cleaned up to fix "source tree is not clean" error)
       - name: Build Kernel
         working-directory: kernel_workspace
         run: |
           set -e
           export KBUILD_BUILD_USER KBUILD_BUILD_HOST
+          
+          # Clean source tree before building to prevent dirty tree error
+          if [ -d "common" ]; then
+            echo "Cleaning common source directory..."
+            cd common
+            make mrproper || true
+            cd ..
+          fi
+
           if [ -f build/build.sh ]; then
             LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
           else
