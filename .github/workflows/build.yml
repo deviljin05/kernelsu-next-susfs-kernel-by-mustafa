@@ -42,9 +42,14 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
 
-      # Step 2: Install Build Dependencies
+      # Step 2: Install Build Dependencies & Free Up Space
       - name: Install build dependencies
         run: |
+          sudo apt-get remove -y '^dotnet-*' '^ghc-*' 'google-cloud-cli*' 'mongodb-*' 'mysql-*' 'php-*' || true
+          sudo apt-get purge -y --autoremove
+          sudo apt-get clean
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/node /usr/local/share/boost || true
+          
           sudo apt-get update
           sudo apt-get install -y \
             git curl wget build-essential bc bison flex libssl-dev \
@@ -235,7 +240,7 @@ jobs:
             echo "::notice::Added tcp_bic, tcp_westwood, and tcp_htcp to gki_aarch64_modules list."
           fi
 
-      # Step 13: Compile Kernel (Cleaned up to fix "source tree is not clean" error)
+      # Step 13: Compile Kernel
       - name: Build Kernel
         working-directory: kernel_workspace
         run: |
