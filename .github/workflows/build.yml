@@ -12,7 +12,7 @@ on:
         required: true
         default: "gki-android12-5.10"
       KSU_BRANCH:
-        description: "KernelSU-Next branch"
+        description: "KernelSU-Next flavor passed to setup.sh (e.g. next-susfs, next-susfs-dev)"
         required: true
         default: "next-susfs"
       ENABLE_BBRPLUS:
@@ -97,7 +97,12 @@ jobs:
         working-directory: kernel_workspace
         run: |
           cd common
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.KSU_BRANCH }}/kernel/setup.sh" \
+          # NOTE: setup.sh itself only lives on the "next" branch of the repo.
+          # The flavor you actually want (next-susfs, next-susfs-dev, etc.)
+          # is passed as an ARGUMENT to the script, not part of the URL.
+          # Using the flavor name in the URL path causes a 404 -> the 404
+          # HTML page gets piped into bash -> "404: command not found".
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s ${{ github.event.inputs.KSU_BRANCH }}
 
       # ---------------------------------------------------------------------
