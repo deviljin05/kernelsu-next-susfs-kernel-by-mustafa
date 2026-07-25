@@ -15,8 +15,8 @@ on:
         description: "KernelSU-Next branch/flavor"
         required: true
         default: "next-susfs"
-      ENABLE_BBRPLUS:
-        description: "Enable BBRplus"
+      ENABLE_BBR:
+        description: "Enable TCP BBR"
         required: true
         default: "true"
 
@@ -139,7 +139,6 @@ jobs:
           KSU_DIR="$(pwd)/KernelSU-Next"
           [ ! -d "$KSU_DIR" ] && KSU_DIR="$(pwd)/common/drivers/kernelsu"
 
-          # Helper function for directory patch execution
           apply_patch_folder() {
             local src_dir="$1"
             local target_dir="$2"
@@ -154,13 +153,8 @@ jobs:
             fi
           }
 
-          # 1. Apply Base Kernel SUSFS Patches to KERNEL_DIR
           apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches" "$KERNEL_DIR"
-
-          # 2. Apply KernelSU SUSFS Patches explicitly inside KSU_DIR
           apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches/KernelSU" "$KSU_DIR"
-
-          # 3. Apply WildKernels Fixes
           apply_patch_folder "$(pwd)/wk_patches/common" "$KERNEL_DIR"
           apply_patch_folder "$(pwd)/wk_patches/next" "$KSU_DIR"
           apply_patch_folder "$(pwd)/wk_patches/ksu" "$KSU_DIR"
@@ -188,8 +182,8 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' fs/proc/task_mmu.c
           fi
 
-      # Step 11: Configure Defconfig Flags
-      - name: Inject Defconfig Flags (SUSFS + BBRplus)
+      # Step 11: Configure Defconfig Flags (SUSFS + Standard BBR)
+      - name: Inject Defconfig Flags (SUSFS + BBR)
         working-directory: kernel_workspace/common
         run: |
           DEFCONFIG=arch/arm64/configs/gki_defconfig
@@ -209,37 +203,27 @@ jobs:
             echo "$cfg" >> "$DEFCONFIG"
           done
 
-          # BBRplus Configs
-          if [ "${{ github.event.inputs.ENABLE_BBRPLUS }}" = "true" ]; then
-            curl -LSs -o /tmp/bbrplus.patch "https://raw.githubusercontent.com/Kuroneko-lab/kernel_patches/main/bbrplus/bbrplus-5.10.patch" || true
-            if [ -s /tmp/bbrplus.patch ]; then
-              patch -p1 --fuzz=3 < /tmp/bbrplus.patch || echo "::warning::BBRplus patch skipped"
-            fi
-            for cfg in CONFIG_TCP_CONG_ADVANCED=y CONFIG_TCP_CONG_BBRPLUS=y CONFIG_DEFAULT_BBRPLUS=y CONFIG_DEFAULT_TCP_CONG=bbrplus CONFIG_NET_SCH_FQ=y CONFIG_NET_SCH_FQ_CODEL=y; do
+          # Standard TCP BBR Configs (Safe, built-in Linux kernel BBR)
+          if [ "${{ github.event.inputs.ENABLE_BBR }}" = "true" ]; then
+            for cfg in \
+              CONFIG_TCP_CONG_BBR=y \
+              CONFIG_DEFAULT_BBR=y \
+              CONFIG_DEFAULT_TCP_CONG=bbr \
+              CONFIG_NET_SCH_FQ=y \
+              CONFIG_NET_SCH_FQ_CODEL=y
+            do
               sed -i "/^${cfg%%=*}=/d" "$DEFCONFIG" 2>/dev/null || true
               echo "$cfg" >> "$DEFCONFIG"
             done
           fi
 
-      # Step 12: Disable Strict Checks & KMI Symbol Validation
-      - name: Disable strict checks & update modules list
+      # Step 12: Disable Strict Defconfig Checks
+      - name: Disable strict checks
         working-directory: kernel_workspace
         run: |
-          # 1. Disable strict defconfig checks & ABI symbol checks
           for f in common/build.config.gki common/build.config.gki.aarch64; do
             [ -f "$f" ] && sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
-            [ -f "$f" ] && sed -i 's/KMI_SYMBOL_LIST_STRICT_MODE=1/KMI_SYMBOL_LIST_STRICT_MODE=0/' "$f"
-            [ -f "$f" ] && sed -i 's/^ABI_SYMBOL_LIST/#ABI_SYMBOL_LIST/' "$f"
           done
-
-          # 2. Append newly generated TCP modules manually
-          MODULES_LIST="common/android/gki_aarch64_modules"
-          if [ -f "$MODULES_LIST" ]; then
-            echo "net/ipv4/tcp_bic.ko" >> "$MODULES_LIST"
-            echo "net/ipv4/tcp_westwood.ko" >> "$MODULES_LIST"
-            echo "net/ipv4/tcp_htcp.ko" >> "$MODULES_LIST"
-            echo "::notice::Added tcp_bic, tcp_westwood, and tcp_htcp to gki_aarch64_modules list."
-          fi
 
       # Step 13: Compile Kernel
       - name: Build Kernel
@@ -248,7 +232,6 @@ jobs:
           set -e
           export KBUILD_BUILD_USER KBUILD_BUILD_HOST
           
-          # Clean source tree before building to prevent dirty tree error
           if [ -d "common" ]; then
             echo "Cleaning common source directory..."
             cd common
