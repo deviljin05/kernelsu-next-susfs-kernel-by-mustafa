@@ -1,28 +1,24 @@
-name: Build GKI android12-5.10 (KernelSU-Next + SUSFS + BBRplus)
+name: Single File GKI KernelSU-Next + SUSFS + WildKernels Build
 
 on:
   workflow_dispatch:
     inputs:
       KERNEL_BRANCH:
-        description: "ACK manifest branch (adjust if your KMI sub-version differs)"
+        description: "ACK manifest branch"
         required: true
         default: "common-android12-5.10-lts"
       SUSFS_BRANCH:
-        description: "SUSFS4KSU branch matching your KMI"
+        description: "SUSFS4KSU branch"
         required: true
         default: "gki-android12-5.10"
       KSU_BRANCH:
-        description: "KernelSU-Next flavor passed to setup.sh (e.g. next-susfs, next-susfs-dev)"
+        description: "KernelSU-Next branch/flavor"
         required: true
         default: "next-susfs"
       ENABLE_BBRPLUS:
-        description: "Apply BBRplus patch"
+        description: "Enable BBRplus"
         required: true
         default: "true"
-      ENABLE_KPM:
-        description: "Enable KPM (SukiSU-style kernel patch module, optional)"
-        required: true
-        default: "false"
 
 env:
   CCACHE_DIR: /home/runner/.ccache
@@ -33,10 +29,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
+
     steps:
-      # ---------------------------------------------------------------------
-      # 1. Free disk space (GKI builds are large; default runner disk is tight)
-      # ---------------------------------------------------------------------
+      # Step 1: Disk Space Optimization
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
@@ -47,12 +42,7 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
 
-      - name: Checkout this repo
-        uses: actions/checkout@v4
-
-      # ---------------------------------------------------------------------
-      # 2. Install dependencies
-      # ---------------------------------------------------------------------
+      # Step 2: Dependencies
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -62,7 +52,6 @@ jobs:
             zip unzip rsync ccache device-tree-compiler \
             libarchive-tools zstd
 
-          # repo tool
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
@@ -72,326 +61,149 @@ jobs:
           git config --global user.email "actions@github.com"
           git config --global color.ui false
 
-      - name: Setup ccache
-        run: |
-          mkdir -p "$CCACHE_DIR"
-          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
-
-      # ---------------------------------------------------------------------
-      # 3. Sync ACK android12-5.10 source
-      #    NOTE: if you get hunk errors later, first check that this branch
-      #    actually matches your phone's exact KMI (5.10.101 / .110 / .157 / .198)
-      #    Settings > About Phone > Kernel version.
-      # ---------------------------------------------------------------------
-      - name: Sync kernel source (repo init/sync)
+      # Step 3: Source Sync
+      - name: Sync kernel source
         run: |
           mkdir -p kernel_workspace && cd kernel_workspace
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b ${{ github.event.inputs.KERNEL_BRANCH }} --depth=1
           repo sync -j$(nproc --all) --no-tags --no-clone-bundle
 
-      # ---------------------------------------------------------------------
-      # 4. Add KernelSU-Next (susfs-dev flavored branch)
-      # ---------------------------------------------------------------------
+      # Step 4: Add KernelSU-Next
       - name: Add KernelSU-Next
         working-directory: kernel_workspace
         run: |
+          set -euo pipefail
           cd common
-          # NOTE: setup.sh itself only lives on the "next" branch of the repo.
-          # The flavor you actually want (next-susfs, next-susfs-dev, etc.)
-          # is passed as an ARGUMENT to the script, not part of the URL.
-          # Using the flavor name in the URL path causes a 404 -> the 404
-          # HTML page gets piped into bash -> "404: command not found".
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s ${{ github.event.inputs.KSU_BRANCH }}
 
-      # ---------------------------------------------------------------------
-      # 5. Apply SUSFS patches
-      # ---------------------------------------------------------------------
-      - name: Clone SUSFS4KSU
+      # Step 5: Clone SUSFS and WildKernels Fixes
+      - name: Clone Patch Repositories
         working-directory: kernel_workspace
         run: |
-          # WildKernels maintains a fork of susfs4ksu that stays synced with
-          # simonpunk's upstream AND carries extra compatibility fixes for
-          # each GKI branch (the same source WildKernels/GKI_KernelSU_SUSFS
-          # itself builds from) — this is why it applies cleaner than the
-          # raw upstream repo on some KMI sub-versions.
           git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
             https://github.com/WildKernels/susfs4ksu.git susfs4ksu \
           || git clone --depth=1 -b ${{ github.event.inputs.SUSFS_BRANCH }} \
             https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
 
-          # Honesty check: don't assume a version number — print the exact
-          # commit that got cloned so it's verifiable in the build log,
-          # not guessed at in this workflow file.
-          cd susfs4ksu
-          echo "=================================================="
-          echo "SUSFS branch : ${{ github.event.inputs.SUSFS_BRANCH }}"
-          echo "SUSFS commit : $(git rev-parse HEAD)"
-          echo "SUSFS date   : $(git log -1 --format=%cd)"
-          echo "SUSFS subject: $(git log -1 --format=%s)"
-          echo "=================================================="
-          {
-            echo "SUSFS_BRANCH=${{ github.event.inputs.SUSFS_BRANCH }}"
-            echo "SUSFS_COMMIT=$(git rev-parse HEAD)"
-            echo "SUSFS_DATE=$(git log -1 --format=%cd)"
-          } >> "$GITHUB_ENV"
+          git clone --depth=1 https://github.com/WildKernels/kernel_patches.git wk_patches || true
 
+          cd susfs4ksu
+          echo "SUSFS_BRANCH=${{ github.event.inputs.SUSFS_BRANCH }}" >> "$GITHUB_ENV"
+          echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # Step 6: Detect Kernel Sublevel
       - name: Detect kernel sublevel
         working-directory: kernel_workspace
         run: |
           SUBLEVEL=$(grep -m1 '^SUBLEVEL' common/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]')
-          echo "Detected kernel SUBLEVEL: $SUBLEVEL"
           echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
 
-      # ---------------------------------------------------------------------
-      # 5a. android12-5.10 "fake patch" pre-fix
-      # Source: verified reference (Setup SUSFS composite action).
-      # The 50_add_susfs_in_gki-android12-5.10.patch file was written
-      # against specific sublevels of fs/proc/base.c and fs/notify/fdinfo.c.
-      # Older/newer sublevels have slightly different code at those exact
-      # lines, so the raw patch rejects. These steps temporarily rewrite
-      # the source to match what the patch expects, so it applies cleanly,
-      # then get reverted right after — the net result is identical to the
-      # patch having matched in the first place.
-      # ---------------------------------------------------------------------
-      - name: Apply android12-5.10 fake patches (pre-SUSFS-patch)
+      # Step 7: Apply Pre-SUSFS Workarounds
+      - name: Apply temporary fake patches
         working-directory: kernel_workspace/common
         if: contains(github.event.inputs.KERNEL_BRANCH, 'android12-5.10')
         run: |
           if [ "${SUBLEVEL}" -le "43" ]; then
-            echo "Applying base.c Android 12 5.10 fake patch (sublevel<=43)"
             perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,/size_t this_len = min_t(size_t,/;' fs/proc/base.c
           fi
           if [ "${SUBLEVEL}" -le "117" ]; then
-            echo "Applying fdinfo.c Android 12 5.10 fake patch (sublevel<=117)"
             sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
             perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
 
-      - name: Apply SUSFS to kernel + KernelSU-Next
+      # Step 8: Apply ALL Patches (SUSFS + WildKernels)
+      - name: Apply ALL SUSFS & WildKernels Patches
         working-directory: kernel_workspace
         run: |
-          set -e
-          SUSFS_DIR="$(pwd)/susfs4ksu"
+          set +e
           KERNEL_DIR="$(pwd)/common"
           KSU_DIR="$(pwd)/KernelSU-Next"
+          [ ! -d "$KSU_DIR" ] && KSU_DIR="$(pwd)/common/drivers/kernelsu"
 
-          # copy susfs kernel patch + required lib files
-          cp "$SUSFS_DIR"/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch "$KERNEL_DIR"/ || \
-          cp "$SUSFS_DIR"/kernel_patches/*.patch "$KERNEL_DIR"/ 2>/dev/null || true
-
-          cp "$SUSFS_DIR"/kernel_patches/fs/* "$KERNEL_DIR"/fs/ 2>/dev/null || true
-          cp "$SUSFS_DIR"/kernel_patches/include/linux/* "$KERNEL_DIR"/include/linux/ 2>/dev/null || true
-
-          cd "$KERNEL_DIR"
-          PATCH_FILE=$(ls 50_add_susfs_in_*.patch 2>/dev/null | head -n1)
-          if [ -n "$PATCH_FILE" ]; then
-            patch -p1 --fuzz=3 < "$PATCH_FILE" || {
-              echo "::warning::SUSFS kernel patch had rejects — check *.rej files, likely KMI sub-version mismatch";
-              find . -name "*.rej";
-            }
-          fi
-
-          # apply susfs patch to KernelSU-Next
-          if [ -d "$KSU_DIR" ]; then
-            cd "$KSU_DIR"
-            SUSFS_KSU_PATCH=$(ls "$SUSFS_DIR"/kernel_patches/KernelSU/*.patch 2>/dev/null | head -n1)
-            if [ -n "$SUSFS_KSU_PATCH" ]; then
-              patch -p1 --fuzz=3 < "$SUSFS_KSU_PATCH" || {
-                echo "::warning::SUSFS KernelSU-Next patch had rejects — check *.rej files";
-                find . -name "*.rej";
-              }
+          apply_patch_folder() {
+            local src_dir="$1"
+            local target_dir="$2"
+            if [ -d "$src_dir" ] && [ -d "$target_dir" ]; then
+              cd "$target_dir"
+              for patch_file in "$src_dir"/*.patch "$src_dir"/*/*.patch; do
+                if [ -f "$patch_file" ]; then
+                  echo "Applying: $(basename "$patch_file") to $(basename "$target_dir")"
+                  patch -p1 --fuzz=3 --forward < "$patch_file" || echo "::warning::Skipped/Failed: $(basename "$patch_file")"
+                fi
+              done
             fi
-          fi
+          }
 
-      # ---------------------------------------------------------------------
-      # 5a-revert. Undo the temporary android12-5.10 fake patches now that
-      # the real SUSFS patch has been applied — source returns to normal.
-      # ---------------------------------------------------------------------
-      - name: Revert android12-5.10 fake patches (post-SUSFS-patch)
+          # Apply SUSFS Base Patches
+          apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches" "$KERNEL_DIR"
+          apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches/KernelSU" "$KSU_DIR"
+
+          # Apply WildKernels Fixes
+          apply_patch_folder "$(pwd)/wk_patches/common" "$KERNEL_DIR"
+          apply_patch_folder "$(pwd)/wk_patches/next" "$KSU_DIR"
+          apply_patch_folder "$(pwd)/wk_patches/ksu" "$KSU_DIR"
+          
+          SUSFS_FIX_DIR=$(find "$(pwd)/wk_patches" -type d -name "susfs_fix_patches" 2>/dev/null | head -n1)
+          [ -n "$SUSFS_FIX_DIR" ] && apply_patch_folder "$SUSFS_FIX_DIR" "$KERNEL_DIR"
+
+          set -e
+
+      # Step 9: Revert Pre-SUSFS Workarounds
+      - name: Revert temporary fake patches
         working-directory: kernel_workspace/common
         if: contains(github.event.inputs.KERNEL_BRANCH, 'android12-5.10')
         run: |
           if [ "${SUBLEVEL}" -le "43" ]; then
-            echo "Reverting base.c Android 12 5.10 fake patch"
             sed -i 's/^size_t this_len = min_t(size_t, count, PAGE_SIZE);$/int this_len = min_t(int, count, PAGE_SIZE);/' fs/proc/base.c
           fi
           if [ "${SUBLEVEL}" -le "117" ]; then
-            echo "Reverting fdinfo.c Android 12 5.10 fake patch"
             perl -i -pe 's/^(\s+if \(inode\) \{)/$1\n\t\t\/\*\n\t\t * IN_ALL_EVENTS represents all of the mask bits\n\t\t * that we expose to userspace.  There is at\n\t\t * least one bit (FS_EVENT_ON_CHILD) which is\n\t\t * used only internally to the kernel.\n\t\t *\/\n\t\tu32 mask = mark->mask & IN_ALL_EVENTS;/m' fs/notify/fdinfo.c
             perl -i -pe 's/\binotify_mark_user_mask\(mark\)/mask, mark->ignored_mask/g' fs/notify/fdinfo.c
             perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
           fi
 
-          # show_pad_fix: needed for android12-5.10 sublevel <= 209
-          if [ "${SUBLEVEL}" -le "209" ]; then
-            echo "Applying show_pad fix (sublevel<=209)"
-            sed -i -e 's/goto show_pad;/return 0;/' fs/proc/task_mmu.c
-          fi
-
-      # ---------------------------------------------------------------------
-      # 5b. WildKernels fix patches — applied ON TOP of the base SUSFS patch.
-      # These are the actual hunk/compatibility fix patches WildKernels
-      # maintains (repo: WildKernels/kernel_patches) so that susfs4ksu
-      # applies cleanly across KMI sub-versions and KernelSU-Next versions.
-      #   ksu/susfs_fix_patches/<latest>/ -> fixes for the SUSFS patch itself
-      #   next/                            -> KernelSU-Next specific fixes
-      #   common/                          -> general GKI compatibility fixes
-      # The susfs_fix_patches version folder (v2.0.0, v2.2.0, etc.) is
-      # auto-detected as the highest version present at build time, so this
-      # workflow always tracks WildKernels' current SUSFS fix set without
-      # needing manual updates here.
-      # All applied best-effort: a patch that doesn't apply to your exact
-      # KMI is skipped with a warning rather than failing the whole build,
-      # since not every fix targets every sub-version.
-      # ---------------------------------------------------------------------
-      - name: Clone and apply WildKernels fix patches
-        working-directory: kernel_workspace
-        run: |
-          set +e
-          git clone --depth=1 https://github.com/WildKernels/kernel_patches.git wk_patches
-          KERNEL_DIR="$(pwd)/common"
-          KSU_DIR="$(pwd)/KernelSU-Next"
-
-          # Auto-detect the latest susfs_fix_patches version folder (sorted
-          # as versions, e.g. v2.0.0 < v2.1.0 < v2.2.0 -> picks v2.2.0)
-          SUSFS_FIX_DIR=$(find wk_patches/ksu/susfs_fix_patches -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
-            | sort -V | tail -n1)
-          if [ -n "$SUSFS_FIX_DIR" ]; then
-            echo "Using latest SUSFS fix patch set: $SUSFS_FIX_DIR"
-          else
-            echo "::warning::No versioned susfs_fix_patches folder found in WildKernels/kernel_patches — skipping this fix set"
-          fi
-
-          apply_all() {
-            local src_dir="$1" target_dir="$2"
-            [ -d "$src_dir" ] || return 0
-            cd "$target_dir" || return 0
-            for p in "$src_dir"/*.patch; do
-              [ -f "$p" ] || continue
-              echo "Applying $(basename "$p") to $(basename "$target_dir")..."
-              patch -p1 --fuzz=3 --forward < "$p" || {
-                echo "::warning::$(basename "$p") did not apply cleanly (may not target your KMI/KSU version) — skipping, see .rej if present";
-                find . -name "*.rej" -newer "$p" 2>/dev/null;
-              }
-              cd "$target_dir"
-            done
-          }
-
-          apply_all "$SUSFS_FIX_DIR" "$KERNEL_DIR"
-          apply_all "wk_patches/common" "$KERNEL_DIR"
-          apply_all "wk_patches/next" "$KSU_DIR"
-          set -e
-
-      - name: Enable SUSFS config flags
+      # Step 10: Configure Defconfig
+      - name: Inject Defconfig Flags (SUSFS + BBRplus)
         working-directory: kernel_workspace/common
         run: |
           DEFCONFIG=arch/arm64/configs/gki_defconfig
+          
+          # SUSFS Flags
           for cfg in \
-            CONFIG_KSU=y \
-            CONFIG_KSU_SUSFS=y \
-            CONFIG_KSU_SUSFS_SUS_PATH=y \
-            CONFIG_KSU_SUSFS_SUS_MOUNT=y \
-            CONFIG_KSU_SUSFS_SUS_KSTAT=y \
-            CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n \
-            CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
-            CONFIG_KSU_SUSFS_SPOOF_UNAME=y \
-            CONFIG_KSU_SUSFS_ENABLE_LOG=y \
+            CONFIG_KSU=y CONFIG_KSU_SUSFS=y CONFIG_KSU_SUSFS_SUS_PATH=y \
+            CONFIG_KSU_SUSFS_SUS_MOUNT=y CONFIG_KSU_SUSFS_SUS_KSTAT=y \
+            CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
+            CONFIG_KSU_SUSFS_SPOOF_UNAME=y CONFIG_KSU_SUSFS_ENABLE_LOG=y \
             CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
             CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y \
-            CONFIG_KSU_SUSFS_OPEN_REDIRECT=y \
-            CONFIG_KSU_SUSFS_SUS_MAP=y \
-            CONFIG_TMPFS_XATTR=y \
-            CONFIG_TMPFS_POSIX_ACL=y
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT=y CONFIG_KSU_SUSFS_SUS_MAP=y \
+            CONFIG_TMPFS_XATTR=y CONFIG_TMPFS_POSIX_ACL=y
           do
-            key="${cfg%%=*}"
-            sed -i "/^${key}=/d" "$DEFCONFIG" 2>/dev/null || true
+            sed -i "/^${cfg%%=*}=/d" "$DEFCONFIG" 2>/dev/null || true
             echo "$cfg" >> "$DEFCONFIG"
           done
 
-      # ---------------------------------------------------------------------
-      # 6. BBRplus (gaming/network optimization — better throughput under loss)
-      # ---------------------------------------------------------------------
-      - name: Apply BBRplus patch
-        if: ${{ github.event.inputs.ENABLE_BBRPLUS == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -e
-          curl -LSs -o /tmp/bbrplus.patch \
-            "https://raw.githubusercontent.com/Kuroneko-lab/kernel_patches/main/bbrplus/bbrplus-5.10.patch" \
-            || echo "::warning::Default BBRplus patch URL unreachable — replace with a patch matching your exact 5.10.x subversion"
-          if [ -s /tmp/bbrplus.patch ]; then
-            patch -p1 --fuzz=3 < /tmp/bbrplus.patch || {
-              echo "::warning::BBRplus patch had rejects — check *.rej files, may need manual hunk fix for your KMI";
-              find . -name "*.rej";
-            }
+          # Optional BBRplus Flags
+          if [ "${{ github.event.inputs.ENABLE_BBRPLUS }}" = "true" ]; then
+            for cfg in CONFIG_TCP_CONG_ADVANCED=y CONFIG_TCP_CONG_BBRPLUS=y CONFIG_DEFAULT_BBRPLUS=y CONFIG_DEFAULT_TCP_CONG=bbrplus; do
+              sed -i "/^${cfg%%=*}=/d" "$DEFCONFIG" 2>/dev/null || true
+              echo "$cfg" >> "$DEFCONFIG"
+            done
           fi
 
-          DEFCONFIG=arch/arm64/configs/gki_defconfig
-          for cfg in \
-            CONFIG_TCP_CONG_ADVANCED=y \
-            CONFIG_TCP_CONG_BBRPLUS=y \
-            CONFIG_DEFAULT_BBRPLUS=y \
-            CONFIG_DEFAULT_TCP_CONG=bbrplus \
-            CONFIG_NET_SCH_FQ=y \
-            CONFIG_NET_SCH_FQ_CODEL=y
-          do
-            key="${cfg%%=*}"
-            sed -i "/^${key}=/d" "$DEFCONFIG" 2>/dev/null || true
-            echo "$cfg" >> "$DEFCONFIG"
-          done
-
-      # ---------------------------------------------------------------------
-      # 7. Gaming / performance oriented tweaks (safe generic set)
-      # ---------------------------------------------------------------------
-      - name: Apply gaming/perf defconfig tweaks
-        working-directory: kernel_workspace/common
-        run: |
-          DEFCONFIG=arch/arm64/configs/gki_defconfig
-          for cfg in \
-            CONFIG_HZ_300=y \
-            CONFIG_HZ=300 \
-            CONFIG_NO_HZ_FULL=y \
-            CONFIG_SCHED_WALT=y \
-            CONFIG_SCHED_AUTOGROUP=y \
-            CONFIG_ZSMALLOC=y \
-            CONFIG_ZRAM=y \
-            CONFIG_ZRAM_DEF_COMP_LZ4=y
-          do
-            key="${cfg%%=*}"
-            sed -i "/^${key}=/d" "$DEFCONFIG" 2>/dev/null || true
-            echo "$cfg" >> "$DEFCONFIG"
-          done
-          echo "::notice::Tweaks are conservative defaults — remove any line above if your device tree doesn't support it (e.g. CONFIG_SCHED_WALT is SoC-dependent)."
-
-      # ---------------------------------------------------------------------
-      # 7b. Disable the strict defconfig verification
-      #
-      # GKI's build.config.gki sets POST_DEFCONFIG_CMDS="check_defconfig",
-      # which runs `make savedefconfig` after defconfig and FAILS the build
-      # if the result isn't byte-for-byte identical to the checked-in
-      # gki_defconfig (Google's reproducibility check for their own CI).
-      # Any config we add on top — KSU, SUSFS, BBRplus, gaming tweaks — is
-      # by definition a deviation from stock, so this check must always be
-      # disabled for any customized GKI build. This is the actual cause of
-      # "ERROR: savedefconfig does not match .../gki_defconfig".
-      # ---------------------------------------------------------------------
-      - name: Disable strict defconfig verification
+      # Step 11: Disable Defconfig Checks
+      - name: Disable strict defconfig checks
         working-directory: kernel_workspace
         run: |
           for f in common/build.config.gki common/build.config.gki.aarch64; do
-            if [ -f "$f" ]; then
-              sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
-              grep -n "POST_DEFCONFIG_CMDS" "$f" || true
-            fi
+            [ -f "$f" ] && sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
           done
 
-      # ---------------------------------------------------------------------
-      # 8. Build
-      # ---------------------------------------------------------------------
-      - name: Build kernel
+      # Step 12: Build Kernel
+      - name: Build Kernel
         working-directory: kernel_workspace
         run: |
           set -e
@@ -399,46 +211,25 @@ jobs:
           if [ -f build/build.sh ]; then
             LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
           else
-            tools/bazel run --config=fast --config=stamp \
-              //common:kernel_aarch64_dist -- --dist_dir=out/dist
+            tools/bazel run --config=fast --config=stamp //common:kernel_aarch64_dist -- --dist_dir=out/dist
           fi
 
-      # ---------------------------------------------------------------------
-      # 9. Package with AnyKernel3
-      # ---------------------------------------------------------------------
-      - name: Clone AnyKernel3
-        run: git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
-
-      - name: Package flashable zip
+      # Step 13: Package Artifact
+      - name: Package AnyKernel3 Zip
         run: |
-          set -e
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           IMG=$(find kernel_workspace -name "Image" -o -name "Image.gz" | head -n1)
-          if [ -z "$IMG" ]; then
-            echo "::error::No kernel Image found — build likely failed above"; exit 1
-          fi
           cp "$IMG" anykernel3/
           cd anykernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
-
-          SUSFS_SHORT="${SUSFS_COMMIT:0:8}"
-          cat > BUILD_INFO.txt <<EOF
-          Kernel: GKI android12-5.10
-          KernelSU-Next flavor: ${{ github.event.inputs.KSU_BRANCH }}
-          SUSFS branch: ${SUSFS_BRANCH}
-          SUSFS commit: ${SUSFS_COMMIT}
-          SUSFS commit date: ${SUSFS_DATE}
-          BBRplus: ${{ github.event.inputs.ENABLE_BBRPLUS }}
-          Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EOF
-          cat BUILD_INFO.txt
-
-          OUT_NAME="KernelSU-Next-SUSFS-${SUSFS_SHORT}-BBRplus-android12-5.10.zip"
+          
+          OUT_NAME="KernelSU-Next-SUSFS-android12-5.10.zip"
           zip -r9 "../${OUT_NAME}" . -x ".git*"
           echo "OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      # Step 14: Upload Artifact
+      - name: Upload Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: GKI-android12-5.10-KSUNext-SUSFS-BBRplus
+          name: GKI-KernelSU-Next-SUSFS-Build
           path: ${{ env.OUT_NAME }}
-          retention-days: 14
