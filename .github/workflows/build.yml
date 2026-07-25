@@ -216,13 +216,24 @@ jobs:
             done
           fi
 
-      # Step 12: Disable Strict Defconfig Checks
-      - name: Disable strict defconfig checks
+      # Step 12: Disable Strict Defconfig & Module Checks (FIXED)
+      - name: Disable strict checks & update modules list
         working-directory: kernel_workspace
         run: |
+          # 1. Disable strict defconfig checks
           for f in common/build.config.gki common/build.config.gki.aarch64; do
             [ -f "$f" ] && sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
           done
+
+          # 2. FIX FOR: "modules list out of date" error
+          # Appending newly generated TCP modules manually so the strict GKI check passes
+          MODULES_LIST="common/android/gki_aarch64_modules"
+          if [ -f "$MODULES_LIST" ]; then
+            echo "net/ipv4/tcp_bic.ko" >> "$MODULES_LIST"
+            echo "net/ipv4/tcp_westwood.ko" >> "$MODULES_LIST"
+            echo "net/ipv4/tcp_htcp.ko" >> "$MODULES_LIST"
+            echo "::notice::Added tcp_bic, tcp_westwood, and tcp_htcp to gki_aarch64_modules list."
+          fi
 
       # Step 13: Compile Kernel
       - name: Build Kernel
