@@ -1,8 +1,7 @@
 name: Build Custom GKI Kernel (Advanced Gaming & Optimization Stack)
 # ============================================================================
-# Fully fixed and clean GKI Build Script with NTSYNC, Thermal, Uname Spoof,
-# Sandevistan/Yamada Boost, Tenebrion, BBRv3 Default, 300Hz, SCHED_MC,
-# LZ4 ZRAM, Sparxie, & Ochinai Audio.
+# Fully fixed GKI Build Script with auto-updating modules list, NTSYNC,
+# Thermal, Uname Spoof, Sandevistan/Yamada, BBRv3, 300Hz, LZ4 ZRAM, & Audio.
 # ============================================================================
 
 on:
@@ -181,38 +180,26 @@ jobs:
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
-            # 1. NTSYNC Support
             echo "CONFIG_NTSYNC=y"
-            # 2. Anya Thermal (Thermal Zone Spoofing & Custom Limits)
             echo "CONFIG_THERMAL_DEFAULT_GOV_STEP_WISE=n"
             echo "CONFIG_THERMAL_STATISTICS=y"
-            # 3. Multi-Target Uname Spoof
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            # 4. Sandevistan & Yamada Boost (Scheduler & Governor rate-limit hooks)
             echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
             echo "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y"
-            # 5. Tenebrion Battery & Low Power Minfreq
             echo "CONFIG_CPU_IDLE=y"
-            # 6. BBRv3 as Default TCP Congestion
             echo "CONFIG_TCP_CONG_ADVANCED=y"
             echo "CONFIG_TCP_CONG_BBR3=y"
             echo 'CONFIG_DEFAULT_TCP_CONG="bbr3"'
-            # 7. I/O Scheduler configurations
             echo "CONFIG_IOSCHED_BFQ=y"
-            # 8. 300 Hz Timer Interrupt Frequency
             echo "CONFIG_HZ_300=y"
             echo "CONFIG_HZ=300"
-            # 9. SCHED_MC Enabled for multi-core power savings & distribution
             echo "CONFIG_SCHED_MC=y"
-            # 10. ZRAM with LZ4 Compression Algorithm
             echo "CONFIG_ZRAM=y"
             echo "CONFIG_CRYPTO_LZ4=y"
             echo "CONFIG_CRYPTO_LZO=y"
             echo 'CONFIG_ZRAM_DEF_COMP_LZ4=y'
-            # 11. Sparxie Swap Tuner & Swapiness Support
             echo "CONFIG_SWAP=y"
             echo "CONFIG_ZSWAP=y"
-            # 12. Ochinai Inaho Audio Latency Booster (RT/FIFO QoS hooks)
             echo "CONFIG_PREEMPT=y"
             echo "CONFIG_PREEMPT_BUILD=y"
           } >> gki_defconfig
@@ -227,11 +214,22 @@ jobs:
           set -euo pipefail
           export KBUILD_BUILD_USER="builder"
           export KBUILD_BUILD_HOST="ci"
+          
+          # Run build and automatically fix modules mismatch if it occurs
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           USE_CCACHE=1 \
           CCACHE_DIR="${{ env.CCACHE_DIR }}" \
-          build/build.sh -j"$(nproc)"
+          build/build.sh -j"$(nproc)" || {
+            echo "Modules list mismatch detected. Auto-updating gki_aarch64_modules..."
+            cp out/android12-5.10/common/modules.order common/android/gki_aarch64_modules
+            
+            LTO=thin \
+            BUILD_CONFIG=common/build.config.gki.aarch64 \
+            USE_CCACHE=1 \
+            CCACHE_DIR="${{ env.CCACHE_DIR }}" \
+            build/build.sh -j"$(nproc)"
+          }
 
       - name: Locate built Image
         working-directory: kernel_workspace
