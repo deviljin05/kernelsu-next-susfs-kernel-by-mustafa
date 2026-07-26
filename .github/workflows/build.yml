@@ -97,7 +97,7 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s ${{ github.event.inputs.KSU_BRANCH }}
 
-      # Step 6: Safe Clone Patch Repositories
+      # Step 6: Safe Clone Patch & Feature Repositories
       - name: Clone Patch Repositories
         working-directory: kernel_workspace
         env:
@@ -138,8 +138,8 @@ jobs:
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
 
-      # Step 9: Apply ALL Patches Safely (With Path Fallbacks)
-      - name: Apply ALL SUSFS & WildKernels Patches
+      # Step 9: Apply ALL SUSFS, WildKernels, BBRv3 & ZRAM Patches Safely
+      - name: Apply ALL Patches & Features
         working-directory: kernel_workspace
         run: |
           set +e
@@ -161,15 +161,24 @@ jobs:
             fi
           }
 
+          # Apply base patches
           apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches" "$KERNEL_DIR"
           apply_patch_folder "$(pwd)/susfs4ksu/kernel_patches/KernelSU" "$KSU_DIR"
           apply_patch_folder "$(pwd)/wk_patches/common" "$KERNEL_DIR"
           apply_patch_folder "$(pwd)/wk_patches/next" "$KSU_DIR"
           apply_patch_folder "$(pwd)/wk_patches/ksu" "$KSU_DIR"
 
-          # Safe dynamic path finding for optional bbr/zenith folders
-          OPT_DIR=$(find "$(pwd)/wk_patches" -type d \( -name "*bbr*" -o -name "*network*" -o -name "*zenith*" -o -name "*gaming*" \) 2>/dev/null | head -n1)
+          # Dynamic wildcard path search for bbr/zenith/zram patches
+          OPT_DIR=$(find "$(pwd)/wk_patches" -type d \( -name "*bbr*" -o -name "*network*" -o -name "*zenith*" -o -name "*gaming*" -o -name "*zram*" \) 2>/dev/null | head -n1)
           [ -n "$OPT_DIR" ] && apply_patch_folder "$OPT_DIR" "$KERNEL_DIR"
+
+          # Ensure BBRv3 source patch is explicitly checked and applied if available locally
+          BBR_LOCAL_PATCH=$(find "$(pwd)/wk_patches" -name "*bbrv3*.patch" -o -name "*bbr3*.patch" 2>/dev/null | head -n1)
+          if [ -n "$BBR_LOCAL_PATCH" ]; then
+            cd "$KERNEL_DIR"
+            echo "===> Applying local BBRv3 source patch..."
+            patch -p1 --fuzz=3 --forward < "$BBR_LOCAL_PATCH" || true
+          fi
 
           SUSFS_FIX_DIR=$(find "$(pwd)/wk_patches" -type d -name "susfs_fix_patches" 2>/dev/null | head -n1)
           [ -n "$SUSFS_FIX_DIR" ] && apply_patch_folder "$SUSFS_FIX_DIR" "$KERNEL_DIR"
@@ -195,7 +204,7 @@ jobs:
           fi
 
       # Step 11: Configure Defconfig Flags (SUSFS + BBRv3 + ZRAM + Zenith)
-      - name: Inject Defconfig Flags (Advanced Optimizations)
+      - name: Inject Defconfig Flags (Advanced Features)
         working-directory: kernel_workspace/common
         run: |
           DEFCONFIG=arch/arm64/configs/gki_defconfig
@@ -230,7 +239,7 @@ jobs:
             done
           fi
 
-          # 3. ZRAM & LZ4/LZ4KD/ZSTD Compressions Optimization
+          # 3. ZRAM & LZ4 / LZ4KD / ZSTD Optimizations
           if [ "${{ github.event.inputs.ENABLE_ZRAM }}" = "true" ]; then
             for cfg in \
               CONFIG_ZRAM=y \
@@ -246,7 +255,7 @@ jobs:
             done
           fi
 
-          # 4. Zenith Gaming Governor & CPU Tweaks
+          # 4. Zenith Gaming Governor & CPU Governor Tweaks
           if [ "${{ github.event.inputs.ENABLE_ZENITH }}" = "true" ]; then
             for cfg in \
               CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y \
@@ -260,18 +269,18 @@ jobs:
             done
           fi
 
-      # Step 12: Disable Strict Defconfig & Symbol List Checks
-      - name: Disable strict checks and fix symbol list
+      # Step 12: Disable Strict Defconfig & Sync Symbol List
+      - name: Disable strict checks and sync symbol list
         working-directory: kernel_workspace
         run: |
           for f in common/build.config.gki common/build.config.gki.aarch64; do
             [ -f "$f" ] && sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
           done
           
-          # Fix missing symbol errors for BBRv3/Zenith
+          # Append missing network congestion symbols to prevent KMI mismatch errors
           SYM_LIST="common/android/abi_symbollist.raw"
           if [ -f "$SYM_LIST" ]; then
-            echo "Adding custom kernel symbols to prevent mismatch errors..."
+            echo "Syncing symbol list for BBRv3 and network extensions..."
             echo "tcp_cong_avoid_ai" >> "$SYM_LIST"
           fi
 
@@ -307,7 +316,7 @@ jobs:
           cd anykernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
           
-          OUT_NAME="KernelSU-Next-SUSFS-BBRv3-Zenith-android12-5.10.zip"
+          OUT_NAME="KernelSU-Next-SUSFS-BBRv3-ZRAM-Zenith-android12-5.10.zip"
           zip -r9 "../${OUT_NAME}" . -x ".git*"
           echo "OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
 
@@ -315,6 +324,6 @@ jobs:
       - name: Upload Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: GKI-KernelSU-Next-SUSFS-BBRv3-Zenith-Build
+          name: GKI-KernelSU-Next-SUSFS-BBRv3-ZRAM-Zenith-Build
           path: ${{ env.OUT_NAME }}
           retention-days: 14
