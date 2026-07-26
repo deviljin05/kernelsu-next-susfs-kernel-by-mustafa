@@ -1,4 +1,4 @@
-name: GKI KernelSU-Next + SUSFS + WildKernels Build
+name: GKI KernelSU-Next + SUSFS + BBRv3 + ZRAM + Zenith Build
 
 on:
   workflow_dispatch:
@@ -16,7 +16,15 @@ on:
         required: true
         default: "next-susfs"
       ENABLE_BBR:
-        description: "Enable TCP BBR"
+        description: "Enable TCP BBRv3"
+        required: true
+        default: "true"
+      ENABLE_ZRAM:
+        description: "Enable ZRAM & LZ4KD/ZSTD optimizations"
+        required: true
+        default: "true"
+      ENABLE_ZENITH:
+        description: "Enable Zenith Gaming Tweaks / Governor"
         required: true
         default: "true"
 
@@ -130,7 +138,7 @@ jobs:
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
 
-      # Step 9: Apply ALL Patches (Correct Directories)
+      # Step 9: Apply ALL Patches Safely (With Path Fallbacks)
       - name: Apply ALL SUSFS & WildKernels Patches
         working-directory: kernel_workspace
         run: |
@@ -159,6 +167,10 @@ jobs:
           apply_patch_folder "$(pwd)/wk_patches/next" "$KSU_DIR"
           apply_patch_folder "$(pwd)/wk_patches/ksu" "$KSU_DIR"
 
+          # Safe dynamic path finding for optional bbr/zenith folders
+          OPT_DIR=$(find "$(pwd)/wk_patches" -type d \( -name "*bbr*" -o -name "*network*" -o -name "*zenith*" -o -name "*gaming*" \) 2>/dev/null | head -n1)
+          [ -n "$OPT_DIR" ] && apply_patch_folder "$OPT_DIR" "$KERNEL_DIR"
+
           SUSFS_FIX_DIR=$(find "$(pwd)/wk_patches" -type d -name "susfs_fix_patches" 2>/dev/null | head -n1)
           [ -n "$SUSFS_FIX_DIR" ] && apply_patch_folder "$SUSFS_FIX_DIR" "$KERNEL_DIR"
 
@@ -182,13 +194,13 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' fs/proc/task_mmu.c
           fi
 
-      # Step 11: Configure Defconfig Flags (SUSFS + Standard BBR)
-      - name: Inject Defconfig Flags (SUSFS + BBR)
+      # Step 11: Configure Defconfig Flags (SUSFS + BBRv3 + ZRAM + Zenith)
+      - name: Inject Defconfig Flags (Advanced Optimizations)
         working-directory: kernel_workspace/common
         run: |
           DEFCONFIG=arch/arm64/configs/gki_defconfig
           
-          # SUSFS Configs
+          # 1. SUSFS Configs
           for cfg in \
             CONFIG_KSU=y CONFIG_KSU_SUSFS=y CONFIG_KSU_SUSFS_SUS_PATH=y \
             CONFIG_KSU_SUSFS_SUS_MOUNT=y CONFIG_KSU_SUSFS_SUS_KSTAT=y \
@@ -203,10 +215,11 @@ jobs:
             echo "$cfg" >> "$DEFCONFIG"
           done
 
-          # Standard TCP BBR Configs (Safe, built-in Linux kernel BBR)
+          # 2. TCP BBRv3 Configs
           if [ "${{ github.event.inputs.ENABLE_BBR }}" = "true" ]; then
             for cfg in \
               CONFIG_TCP_CONG_BBR=y \
+              CONFIG_TCP_CONG_BBR3=y \
               CONFIG_DEFAULT_BBR=y \
               CONFIG_DEFAULT_TCP_CONG=bbr \
               CONFIG_NET_SCH_FQ=y \
@@ -217,13 +230,50 @@ jobs:
             done
           fi
 
-      # Step 12: Disable Strict Defconfig Checks
-      - name: Disable strict checks
+          # 3. ZRAM & LZ4/LZ4KD/ZSTD Compressions Optimization
+          if [ "${{ github.event.inputs.ENABLE_ZRAM }}" = "true" ]; then
+            for cfg in \
+              CONFIG_ZRAM=y \
+              CONFIG_ZRAM_DEF_COMP_LZ4=y \
+              CONFIG_ZRAM_DEF_COMP="lz4" \
+              CONFIG_CRYPTO_LZ4=y \
+              CONFIG_CRYPTO_LZ4HC=y \
+              CONFIG_CRYPTO_ZSTD=y \
+              CONFIG_ZSWAP=y
+            do
+              sed -i "/^${cfg%%=*}=/d" "$DEFCONFIG" 2>/dev/null || true
+              echo "$cfg" >> "$DEFCONFIG"
+            done
+          fi
+
+          # 4. Zenith Gaming Governor & CPU Tweaks
+          if [ "${{ github.event.inputs.ENABLE_ZENITH }}" = "true" ]; then
+            for cfg in \
+              CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y \
+              CONFIG_CPU_FREQ_GOV_USERSPACE=y \
+              CONFIG_CPU_FREQ_GOV_ONDEMAND=y \
+              CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y \
+              CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+            do
+              sed -i "/^${cfg%%=*}=/d" "$DEFCONFIG" 2>/dev/null || true
+              echo "$cfg" >> "$DEFCONFIG"
+            done
+          fi
+
+      # Step 12: Disable Strict Defconfig & Symbol List Checks
+      - name: Disable strict checks and fix symbol list
         working-directory: kernel_workspace
         run: |
           for f in common/build.config.gki common/build.config.gki.aarch64; do
             [ -f "$f" ] && sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/' "$f"
           done
+          
+          # Fix missing symbol errors for BBRv3/Zenith
+          SYM_LIST="common/android/abi_symbollist.raw"
+          if [ -f "$SYM_LIST" ]; then
+            echo "Adding custom kernel symbols to prevent mismatch errors..."
+            echo "tcp_cong_avoid_ai" >> "$SYM_LIST"
+          fi
 
       # Step 13: Compile Kernel
       - name: Build Kernel
@@ -257,7 +307,7 @@ jobs:
           cd anykernel3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
           
-          OUT_NAME="KernelSU-Next-SUSFS-android12-5.10.zip"
+          OUT_NAME="KernelSU-Next-SUSFS-BBRv3-Zenith-android12-5.10.zip"
           zip -r9 "../${OUT_NAME}" . -x ".git*"
           echo "OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
 
@@ -265,6 +315,6 @@ jobs:
       - name: Upload Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: GKI-KernelSU-Next-SUSFS-Build
+          name: GKI-KernelSU-Next-SUSFS-BBRv3-Zenith-Build
           path: ${{ env.OUT_NAME }}
           retention-days: 14
