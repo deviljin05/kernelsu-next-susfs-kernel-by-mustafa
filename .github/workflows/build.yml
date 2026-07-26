@@ -1,7 +1,7 @@
 name: Build Custom GKI Kernel (Advanced Gaming & Optimization Stack)
 # ============================================================================
-# Fully fixed GKI Build Script with auto-updating modules list, NTSYNC,
-# Thermal, Uname Spoof, Sandevistan/Yamada, BBRv3, 300Hz, LZ4 ZRAM, & Audio.
+# Fully fixed GKI Build Script with KMI symbol list auto-patching for BBRv3,
+# auto-updating modules list, NTSYNC, Thermal, Uname Spoof, LZ4 ZRAM, & Audio.
 # ============================================================================
 
 on:
@@ -208,22 +208,33 @@ jobs:
         working-directory: kernel_workspace
         run: sed -i 's/check_defconfig//' ./common/build.config.gki
 
-      - name: Build kernel
+      - name: Build kernel with KMI symbol & modules auto-fix
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
           export KBUILD_BUILD_USER="builder"
           export KBUILD_BUILD_HOST="ci"
           
-          # Run build and automatically fix modules mismatch if it occurs
+          # First build attempt
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           USE_CCACHE=1 \
           CCACHE_DIR="${{ env.CCACHE_DIR }}" \
           build/build.sh -j"$(nproc)" || {
-            echo "Modules list mismatch detected. Auto-updating gki_aarch64_modules..."
-            cp out/android12-5.10/common/modules.order common/android/gki_aarch64_modules
+            echo "Build failed due to symbol or module mismatch. Auto-fixing..."
             
+            # Auto-add missing symbol to symbol list if present
+            if [ -f "out/android12-5.10/common/abi_symbollist.raw" ]; then
+              echo "tcp_cong_avoid_ai" >> common/android/abi_symbollist_commonarm64 || true
+              echo "tcp_cong_avoid_ai" >> common/android/abi_symbollist.raw || true
+            fi
+            
+            # Auto-update modules list if mismatch
+            if [ -f "out/android12-5.10/common/modules.order" ]; then
+              cp out/android12-5.10/common/modules.order common/android/gki_aarch64_modules
+            fi
+            
+            echo "Retrying build..."
             LTO=thin \
             BUILD_CONFIG=common/build.config.gki.aarch64 \
             USE_CCACHE=1 \
