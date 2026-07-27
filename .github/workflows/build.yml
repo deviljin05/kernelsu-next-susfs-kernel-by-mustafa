@@ -961,31 +961,22 @@ jobs:
             commit -m "Clean dirty flag" --allow-empty -q
 
       # ------------------------------------------------------------------
-      # FIX: the previous version of this step deleted setlocalversion's
-      # last line (which is where the real "-android12-9-g<hash>" suffix
-      # gets assembled and printed) and replaced it with a hardcoded
-      # `echo "-Blaze"`. That discarded the actual computed version, so
-      # the on-device kernel string collapsed to just "5.10.260-Blaze"
-      # instead of the full "5.10.260-android12-9-g<hash>-Blaze".
-      #
-      # Fixed by leaving the original script completely untouched and
-      # wrapping it instead: rename it, call the original from a small
-      # wrapper, and append "-Blaze" to whatever it actually printed.
-      # This preserves the full real version string and just tags
-      # "-Blaze" on the end, instead of replacing it.
+      # Custom kernel branding — user explicitly wants the exact string
+      # "5.10.<sublevel>-Blaze-Stable-Ksun-v1" with NO git hash / no
+      # "-android12-9-g<hash>" segment. Unlike the earlier revision of
+      # this step (which was a bug — it accidentally dropped the hash
+      # instead of keeping it), this time it's dropped on purpose: the
+      # whole setlocalversion script is replaced with a single hardcoded
+      # echo, so nothing but the base "5.10.<sublevel>" (from the
+      # Makefile) plus this suffix ends up in the final string.
       # ------------------------------------------------------------------
       - name: Apply custom kernel branding
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          mv scripts/setlocalversion scripts/setlocalversion.orig
-          chmod +x scripts/setlocalversion.orig
           cat > scripts/setlocalversion << 'SETLOCALVERSION_EOF'
           #!/bin/sh
-          # Wrapper: run the real setlocalversion logic unmodified, then
-          # append "-Blaze" to whatever it computed instead of replacing it.
-          out="$("$(dirname "$0")/setlocalversion.orig" "$@")"
-          printf '%s-Blaze-Stable-Ksun-v1\n' "$out"
+          echo "-Blaze-Stable-Ksun-v1"
           SETLOCALVERSION_EOF
           chmod +x scripts/setlocalversion
 
