@@ -10,7 +10,8 @@ name: Build Custom GKI Kernel (Wild KSU + SUSFS + BBRv3)
 # ADDED (this revision): memory/storage optimization configs (KSM, CMA,
 # writeback tuning, F2FS/EXT4 tuning) + an in-kernel touch-boost driver
 # (input notifier → short freq_qos MIN boost on touch), wired the same
-# way as the existing SuiTune boot-boost/screen-off driver.
+# way as the existing SuiTune boot-boost/screen-off driver. Also added
+# IO scheduler forced to "none" (only mq-none built in, others disabled).
 # ============================================================================
 
 on:
@@ -271,6 +272,16 @@ jobs:
             echo "CONFIG_CRYPTO_LZ4HC=y"
             echo "CONFIG_ZRAM_DEF_COMP_LZ4HC=y"
             echo 'CONFIG_ZRAM_DEF_COMP="lz4hc"'
+          } >> gki_defconfig
+
+      - name: Set IO scheduler to none
+        run: |
+          cd kernel_workspace/common/arch/arm64/configs
+          {
+            echo "CONFIG_MQ_IOSCHED_NONE=y"
+            echo "# CONFIG_MQ_IOSCHED_DEADLINE is not set"
+            echo "# CONFIG_MQ_IOSCHED_KYBER is not set"
+            echo "# CONFIG_IOSCHED_BFQ is not set"
           } >> gki_defconfig
 
       - name: Set memory management optimization configs
