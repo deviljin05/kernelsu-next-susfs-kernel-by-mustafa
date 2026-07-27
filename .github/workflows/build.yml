@@ -985,7 +985,7 @@ jobs:
           # Wrapper: run the real setlocalversion logic unmodified, then
           # append "-Blaze" to whatever it computed instead of replacing it.
           out="$("$(dirname "$0")/setlocalversion.orig" "$@")"
-          printf '%s-Blaze-Stable\n' "$out"
+          printf '%s-Blaze-Stable-Ksun-v1\n' "$out"
           SETLOCALVERSION_EOF
           chmod +x scripts/setlocalversion
 
