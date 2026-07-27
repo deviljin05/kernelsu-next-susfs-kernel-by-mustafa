@@ -17,13 +17,13 @@ on:
   workflow_dispatch:
     inputs:
       os_patch_level:
-        description: "Kernel branch tag — 'lts' tracks the rolling LTS branch (recommended, always current)"
+        description: "Kernel branch tag — 'lts' tracks the rolling LTS branch (always current). NOTE: since susfs_commit below is now pinned to a fixed, verified commit, leaving this on 'lts' means the kernel side can still drift ahead of that fixed SUSFS commit over time. If a similar patch-mismatch error resurfaces months from now, pin this to a specific dated tag too instead of 'lts'."
         required: true
         default: "lts"
       susfs_commit:
-        description: "SUSFS commit hash (leave empty = latest on gki-android12-5.10 branch, i.e. latest SUSFS release)"
+        description: "SUSFS commit hash, pinned to a verified working commit for gki-android12-5.10 (matches a commit WildKernels' own release notes recorded as tested for this branch). Change only if you know what you're doing — leaving this on 'always latest' is what caused the fs/namei.c set_nameidata mismatch, because the rolling kernel branch and the rolling SUSFS branch can drift out of sync with each other."
         required: false
-        default: ""
+        default: "86114db0c49f20fa7857b8b559f3ab87cbc2d00d"
       device_name:
         description: "Optional label for artifact naming"
         required: false
@@ -132,11 +132,29 @@ jobs:
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
 
+      # ------------------------------------------------------------------
+      # FIX: was --fuzz=3, which can silently apply a hunk to the wrong
+      # (but similar-looking) context instead of rejecting it — that's
+      # exactly what caused the fs/namei.c set_nameidata() mismatch
+      # (call sites got the patched 4-arg version, but the function
+      # definition didn't, because os_patch_level: lts tracks whatever
+      # the newest upstream sublevel is, which can outrun what this
+      # SUSFS patch was written against). --fuzz=0 makes any such
+      # mismatch a clean, visible reject (caught by the check below)
+      # instead of a silently-broken half-applied patch that only shows
+      # up as a confusing compile error later.
+      #
+      # If this now fails: the kernel source has drifted from what this
+      # SUSFS release supports. The fix at that point is to either pin
+      # os_patch_level to an older/dated tag that matches, or wait for
+      # susfs4ksu's gki-android12-5.10 branch to catch up — not to raise
+      # fuzz back up to force it through.
+      # ------------------------------------------------------------------
       - name: Apply SUSFS kernel patch
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          if ! patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch; then
+          if ! patch -p1 --fuzz=0 < 50_add_susfs_in_gki-android12-5.10.patch; then
             echo "::error::SUSFS patch failed to apply cleanly — .rej files below:"
             find . -name "*.rej"
             exit 1
