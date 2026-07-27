@@ -330,6 +330,28 @@ jobs:
             echo "CONFIG_EXT4_USE_FOR_EXT2=y"
           } >> gki_defconfig
 
+      # ------------------------------------------------------------------
+      # ADDED: force I/O scheduler to "none". blk-mq has no direct
+      # "default scheduler" Kconfig switch — instead, if a device reports
+      # a single hardware queue (true for most UFS/eMMC phones), the
+      # kernel auto-attaches mq-deadline UNLESS no mq scheduler is even
+      # compiled in, in which case "none" is the only option and becomes
+      # the default automatically. So instead of an init.rc script
+      # (userspace, outside kernel build scope) or a custom uevent-driven
+      # driver (extra untested code, probe-timing race with late-probing
+      # UFS), this just disables the other schedulers at the defconfig
+      # level — deterministic, no custom code, no timing dependency.
+      # ------------------------------------------------------------------
+      - name: Force I/O scheduler to none (disable other mq schedulers)
+        run: |
+          cd kernel_workspace/common/arch/arm64/configs
+          {
+            echo "CONFIG_MQ_IOSCHED_DEADLINE=n"
+            echo "CONFIG_MQ_IOSCHED_KYBER=n"
+            echo "CONFIG_IOSCHED_BFQ=n"
+            echo "CONFIG_IOSCHED_BFQ_CGROUP_DEBUG=n"
+          } >> gki_defconfig
+
       - name: Apply NTSync patches
         working-directory: kernel_workspace/common
         run: |
