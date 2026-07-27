@@ -834,8 +834,7 @@ jobs:
           chmod +x scripts/setlocalversion.orig
           cat > scripts/setlocalversion << 'SETLOCALVERSION_EOF'
           #!/bin/sh
-          out="$("$(dirname "$0")/setlocalversion.orig" "$@")"
-          printf '%s-Blaze-Stable\n' "$out"
+          printf -- '-BLAZE-KSUNv1-STABLE\n'
           SETLOCALVERSION_EOF
           chmod +x scripts/setlocalversion
 
