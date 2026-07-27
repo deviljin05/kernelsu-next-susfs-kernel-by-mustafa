@@ -142,6 +142,12 @@ jobs:
             exit 1
           fi
 
+      - name: Fix SUSFS set_nameidata argument mismatch
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          sed -i 's/set_nameidata(nd, old_dfd, fake_filename, NULL);/set_nameidata(nd, old_dfd, fake_filename);/g' fs/namei.c
+
       - name: Revert android12-5.10 pre-patch compatibility fixes
         working-directory: kernel_workspace/common
         run: |
@@ -267,18 +273,6 @@ jobs:
             echo 'CONFIG_ZRAM_DEF_COMP="lz4hc"'
           } >> gki_defconfig
 
-      # ------------------------------------------------------------------
-      # ADDED: Memory management optimization configs.
-      # - CONFIG_KSM: kernel same-page merging, dedups identical anon
-      #   pages across processes → lower real RAM usage under multitasking.
-      # - CONFIG_CMA / CONFIG_ZSMALLOC already above, kept in-tree defaults.
-      # - CONFIG_ZRAM_WRITEBACK: lets zram pages fall back to a backing
-      #   device instead of being force-evicted, common on low-RAM devices.
-      # - CONFIG_COMPACTION / CONFIG_MIGRATION: keeps free memory less
-      #   fragmented, improves large-order allocation success (camera,
-      #   games) without needing more RAM.
-      # All of these are mainline Kconfig symbols, no external patch.
-      # ------------------------------------------------------------------
       - name: Set memory management optimization configs
         run: |
           cd kernel_workspace/common/arch/arm64/configs
@@ -290,13 +284,6 @@ jobs:
             echo "CONFIG_PAGE_REPORTING=y"
           } >> gki_defconfig
 
-      # ------------------------------------------------------------------
-      # ADDED: dirty-page writeback tuning (source defaults, same pattern
-      # as the existing swappiness step below). Lower dirty ratios mean
-      # the kernel starts flushing to storage sooner in smaller chunks
-      # instead of large bursts — smoother UI on eMMC/slower UFS, at a
-      # small cost to raw sequential-write throughput.
-      # ------------------------------------------------------------------
       - name: Set writeback (dirty ratio) tuning in source
         working-directory: kernel_workspace/common
         run: |
@@ -312,11 +299,6 @@ jobs:
             echo "::warning::dirty_background_ratio default not found at expected line — left unchanged, can still be set at runtime via sysctl vm.dirty_background_ratio"
           fi
 
-      # ------------------------------------------------------------------
-      # ADDED: storage (F2FS/EXT4) optimization configs — F2FS
-      # compression + discard/TRIM tuning for eMMC/UFS wear + free-space
-      # reclaim, matching what most GKI custom kernels ship for storage.
-      # ------------------------------------------------------------------
       - name: Set storage (F2FS/EXT4) optimization configs
         run: |
           cd kernel_workspace/common/arch/arm64/configs
@@ -361,41 +343,6 @@ jobs:
             echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
           } >> gki_defconfig
 
-      # ------------------------------------------------------------------
-      # ADDED: "Zenith" custom gaming CPU governor. This is NOT an
-      # upstream/verified governor — it's a small custom polling governor
-      # written for this build, same spirit as the SuiTune driver below.
-      #
-      # Behavior: samples per-CPU idle time every 10ms; if load crosses
-      # up_threshold it jumps straight to max freq (no gradual ramp, for
-      # minimum input-to-frame latency); if load stays low for a few
-      # consecutive samples it steps back down instead of dropping
-      # instantly, to avoid oscillation.
-      #
-      # Per-cluster tuning: the cluster with the highest cpuinfo.max_freq
-      # (big/prime cores, which carry most of the gaming load) uses more
-      # aggressive thresholds (up=55%, down=25%) so it responds fastest.
-      # Other clusters (little/efficiency cores) use conservative
-      # thresholds (up=75%, down=35%) so they don't spike to max for
-      # background/UI ticks — that would add heat and drain battery
-      # without improving frame times, and unnecessary heat is what
-      # eventually forces thermal throttling and tanks sustained
-      # performance mid-session.
-      #
-      # Thermal safety: no separate thermal polling was added — it would
-      # need to guess device-specific thermal zone names, which is
-      # fragile. Instead this relies on the existing kernel mechanism:
-      # when the thermal driver reduces policy->max under load, cpufreq
-      # core calls the governor's .limits callback (zenith_governor_
-      # limits(), wired below), and every subsequent "jump to max"
-      # target is clamped to policy->max automatically. So thermal
-      # throttling still works normally under this governor.
-      #
-      # It does NOT become the default governor (schedutil stays default
-      # from the step above) — it's just made available, selectable at
-      # runtime with:
-      #   echo zenith > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-      # ------------------------------------------------------------------
       - name: Add Zenith custom gaming CPU governor
         working-directory: kernel_workspace/common
         run: |
@@ -421,21 +368,11 @@ jobs:
 
           #define ZENITH_SAMPLE_MS 10
 
-          /*
-           * Per-cluster tuning. Cores whose cpuinfo.max_freq matches the
-           * highest max_freq seen across all cpufreq policies on the SoC
-           * are treated as the "performance" cluster (big/prime) — these
-           * carry most of the real gaming workload, so they scale up
-           * fastest and hold frequency longer. Every other cluster is
-           * treated as "efficiency" (little) — kept less trigger-happy so
-           * it isn't spiking to max for background/UI ticks, which would
-           * only add heat without helping frame times.
-           */
           struct zenith_tunables {
-          	unsigned int up_threshold;    /* % load to jump to max freq */
-          	unsigned int down_threshold;  /* % load to start stepping down */
-          	unsigned int down_debounce;   /* consecutive low samples before stepping down */
-          	unsigned int down_step_pct;   /* % of (max-min) range to step down each time */
+          	unsigned int up_threshold;
+          	unsigned int down_threshold;
+          	unsigned int down_debounce;
+          	unsigned int down_step_pct;
           };
 
           static const struct zenith_tunables zenith_perf = {
@@ -465,10 +402,6 @@ jobs:
 
           static DEFINE_PER_CPU(struct zenith_cpu_dbs, zenith_dbs);
 
-          /* Highest cpuinfo.max_freq seen across all cpufreq policies so far.
-           * Used to classify each policy as performance vs efficiency cluster
-           * the first time any CPU in it starts the governor.
-           */
           static unsigned int zenith_global_max_freq;
           static DEFINE_MUTEX(zenith_global_lock);
 
@@ -572,11 +505,6 @@ jobs:
           	dbs->prev_idle = get_cpu_idle_time(policy->cpu, &dbs->prev_wall, 0);
           	dbs->active = true;
 
-          	pr_info("zenith: cpu%u started as %s cluster (up=%u%% down=%u%%)\n",
-          		policy->cpu,
-          		dbs->tunables == &zenith_perf ? "performance" : "efficiency",
-          		dbs->tunables->up_threshold, dbs->tunables->down_threshold);
-
           	INIT_DELAYED_WORK(&dbs->work, zenith_work_fn);
           	schedule_delayed_work_on(policy->cpu, &dbs->work,
           				  msecs_to_jiffies(ZENITH_SAMPLE_MS));
@@ -601,14 +529,6 @@ jobs:
           		__cpufreq_driver_target(policy, policy->max, CPUFREQ_RELATION_H);
           }
 
-          /*
-           * FIX: mainline 5.10 uses the modern cpufreq_governor struct
-           * (separate .start/.stop/.limits function pointers), not the
-           * older CPUFREQ_GOV_START/STOP/LIMITS event + single .governor
-           * callback API from pre-5.9 kernels. Wire the functions in
-           * directly — their signatures already match what this struct
-           * expects, no wrapper/switch needed.
-           */
           static struct cpufreq_governor zenith_gov = {
           	.name		= "zenith",
           	.owner		= THIS_MODULE,
@@ -625,13 +545,11 @@ jobs:
           MODULE_DESCRIPTION("Zenith: aggressive gaming-oriented cpufreq governor");
           ZENITH_EOF
 
-          # Wire into Kconfig
           if ! grep -q "CPU_FREQ_GOV_ZENITH" drivers/cpufreq/Kconfig; then
             sed -i '/^config CPU_FREQ_GOV_SCHEDUTIL/i \
-          config CPU_FREQ_GOV_ZENITH\n\ttristate "zenith"\n\thelp\n\t  Custom gaming-oriented governor: jumps straight to max freq on\n\t  load spikes for low input latency, steps down with a short\n\t  debounce when idle. Not an upstream governor.\n\n\t  If in doubt, say N.\n' drivers/cpufreq/Kconfig
+          config CPU_FREQ_GOV_ZENITH\n\ttristate "zenith"\n\thelp\n\t  Custom gaming-oriented governor.\n\n\t  If in doubt, say N.\n' drivers/cpufreq/Kconfig
           fi
 
-          # Wire into Makefile
           if ! grep -q "cpufreq_zenith" drivers/cpufreq/Makefile; then
             echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH)	+= cpufreq_zenith.o' >> drivers/cpufreq/Makefile
           fi
@@ -644,36 +562,8 @@ jobs:
           set -euo pipefail
           if grep -q "int vm_swappiness = 60;" mm/vmscan.c; then
             sed -i 's/int vm_swappiness = 60;/int vm_swappiness = 30;/' mm/vmscan.c
-            echo "Default vm_swappiness changed to 30 in mm/vmscan.c"
-          else
-            echo "::warning::Could not find 'int vm_swappiness = 60;' in mm/vmscan.c — default swappiness left at kernel's stock value. This can still be set at runtime with 'sysctl vm.swappiness=30' if needed."
           fi
 
-      # ------------------------------------------------------------------
-      # Custom in-kernel driver: Sandevistan Boot (max CPU freq for the
-      # first 60s after boot) + Tenebrion Battery (cap CPU freq to its
-      # minimum while the screen is off). Both are implemented as real
-      # kernel code using the standard freq_qos framework (cooperates
-      # correctly with thermal/other constraints, unlike raw sysfs
-      # writes) and the framebuffer blank/unblank notifier that the
-      # kernel already fires on every screen on/off — no userspace
-      # polling, no companion module needed.
-      #
-      # NOTE: audioserver SCHED_FIFO priority boost (Ochinai Inaho Audio)
-      # is intentionally NOT included here — audioserver is an Android
-      # userspace daemon spawned by init/zygote after boot; the kernel
-      # has no concept of it at build or boot time, so there is no way
-      # to move this into kernel source. It would require either a
-      # userspace script or an init.rc "priority" entry in vendor_boot,
-      # neither of which is "the kernel" — left out rather than faked.
-      #
-      # ADDED: touch-boost — registers an input_handler on the
-      # touchscreen's event device and requests a short freq_qos MIN
-      # bump (250ms, refreshed on every new touch) so the first frames
-      # after a tap/scroll start don't wait for the governor to ramp up.
-      # Same freq_qos mechanism as boot-boost above, so it composes
-      # correctly with thermal/other constraints instead of fighting them.
-      # ------------------------------------------------------------------
       - name: Add SuiTune in-kernel driver (boot boost + screen-off min-freq + touch boost)
         working-directory: kernel_workspace/common
         run: |
@@ -725,7 +615,6 @@ jobs:
           	}
           	schedule_delayed_work(&suitune_boost_work,
           			      msecs_to_jiffies(SUITUNE_BOOST_MS));
-          	pr_info("suitune: boot boost active for %d ms\n", SUITUNE_BOOST_MS);
           }
 
           static void suitune_boost_end(struct work_struct *work)
@@ -738,7 +627,6 @@ jobs:
           			boost_active[cpu] = false;
           		}
           	}
-          	pr_info("suitune: boot boost ended\n");
           }
 
           static int suitune_fb_notifier_callback(struct notifier_block *self,
@@ -768,7 +656,6 @@ jobs:
           			}
           			cpufreq_cpu_put(policy);
           		}
-          		pr_info("suitune: screen off, min-freq cap applied\n");
           	} else if (blank == FB_BLANK_UNBLANK) {
           		for_each_possible_cpu(cpu) {
           			if (screenoff_active[cpu]) {
@@ -776,7 +663,6 @@ jobs:
           				screenoff_active[cpu] = false;
           			}
           		}
-          		pr_info("suitune: screen on, min-freq cap removed\n");
           	}
           	return NOTIFY_OK;
           }
@@ -784,8 +670,6 @@ jobs:
           static struct notifier_block suitune_fb_notif = {
           	.notifier_call = suitune_fb_notifier_callback,
           };
-
-          /* ---- touch boost ---- */
 
           static void suitune_touch_boost_start(void)
           {
@@ -797,7 +681,6 @@ jobs:
           		policy = cpufreq_cpu_get(cpu);
           		if (!policy)
           			continue;
-          		/* boost toward max, but respect the screen-off cap if active */
           		target = policy->cpuinfo.max_freq;
           		if (!touch_active[cpu]) {
           			if (!freq_qos_add_request(&policy->constraints,
@@ -809,7 +692,6 @@ jobs:
           		}
           		cpufreq_cpu_put(policy);
           	}
-          	/* refresh the timeout on every new touch instead of stacking work */
           	mod_delayed_work(system_wq, &suitune_touch_boost_work,
           			  msecs_to_jiffies(SUITUNE_TOUCH_BOOST_MS));
           }
@@ -875,7 +757,6 @@ jobs:
           	kfree(handle);
           }
 
-          /* match any touchscreen-class input device (reports EV_ABS + BTN_TOUCH) */
           static const struct input_device_id suitune_input_ids[] = {
           	{
           		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
@@ -905,10 +786,7 @@ jobs:
           	ret = input_register_handler(&suitune_input_handler);
           	if (ret)
           		pr_warn("suitune: touch-boost input handler registration failed (%d)\n", ret);
-          	else
-          		pr_info("suitune: touch-boost input handler registered\n");
 
-          	pr_info("suitune: initialized\n");
           	return 0;
           }
 
@@ -918,10 +796,9 @@ jobs:
           MODULE_DESCRIPTION("SuiTune: in-kernel boot boost + screen-off min-freq cap + touch boost");
           SUITUNE_EOF
 
-          # Wire it into the build system
           if ! grep -q "config SUITUNE" drivers/misc/Kconfig; then
             sed -i '/^endmenu/i \
-          config SUITUNE\n\tbool "SuiTune: boot CPU boost + screen-off min-freq cap + touch boost"\n\tdepends on CPU_FREQ \&\& FB \&\& INPUT\n\tdefault y\n\thelp\n\t  In-kernel replacement for SuiKernel'"'"'s Sandevistan Boot and\n\t  Tenebrion Battery features, plus a touch-boost input handler:\n\t  max CPU freq for 60s after boot, capped-to-minimum CPU freq\n\t  while the screen is off, and a short CPU freq boost on every\n\t  touchscreen input event.\n' drivers/misc/Kconfig
+          config SUITUNE\n\tbool "SuiTune: boot CPU boost + screen-off min-freq cap + touch boost"\n\tdepends on CPU_FREQ \&\& FB \&\& INPUT\n\tdefault y\n' drivers/misc/Kconfig
           fi
           if ! grep -q "CONFIG_SUITUNE" drivers/misc/Makefile; then
             echo 'obj-$(CONFIG_SUITUNE) += suitune.o' >> drivers/misc/Makefile
@@ -938,20 +815,6 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
             commit -m "Clean dirty flag" --allow-empty -q
 
-      # ------------------------------------------------------------------
-      # FIX: the previous version of this step deleted setlocalversion's
-      # last line (which is where the real "-android12-9-g<hash>" suffix
-      # gets assembled and printed) and replaced it with a hardcoded
-      # `echo "-Blaze"`. That discarded the actual computed version, so
-      # the on-device kernel string collapsed to just "5.10.260-Blaze"
-      # instead of the full "5.10.260-android12-9-g<hash>-Blaze".
-      #
-      # Fixed by leaving the original script completely untouched and
-      # wrapping it instead: rename it, call the original from a small
-      # wrapper, and append "-Blaze" to whatever it actually printed.
-      # This preserves the full real version string and just tags
-      # "-Blaze" on the end, instead of replacing it.
-      # ------------------------------------------------------------------
       - name: Apply custom kernel branding
         working-directory: kernel_workspace/common
         run: |
@@ -960,8 +823,6 @@ jobs:
           chmod +x scripts/setlocalversion.orig
           cat > scripts/setlocalversion << 'SETLOCALVERSION_EOF'
           #!/bin/sh
-          # Wrapper: run the real setlocalversion logic unmodified, then
-          # append "-Blaze" to whatever it computed instead of replacing it.
           out="$("$(dirname "$0")/setlocalversion.orig" "$@")"
           printf '%s-Blaze-Stable\n' "$out"
           SETLOCALVERSION_EOF
