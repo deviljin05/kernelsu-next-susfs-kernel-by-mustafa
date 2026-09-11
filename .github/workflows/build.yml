@@ -56,7 +56,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git curl bc bison flex libssl-dev \
             build-essential python3 python3-pip libncurses-dev \
-            ccache zip unzip device-tree-compiler
+            ccache zip unzip device-tree-compiler \
+            binutils binutils-aarch64-linux-gnu lld pahole
 
       - name: Install repo tool
         run: |
@@ -100,6 +101,9 @@ jobs:
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_HAVE_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
