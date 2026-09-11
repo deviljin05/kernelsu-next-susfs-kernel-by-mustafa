@@ -101,6 +101,7 @@ jobs:
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
+            echo "CONFIG_MODULES=y"
             echo "CONFIG_KPROBES=y"
             echo "CONFIG_HAVE_KPROBES=y"
             echo "CONFIG_KPROBE_EVENTS=y"
@@ -116,6 +117,7 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
           } >> gki_defconfig
+
 
       - name: Copy SUSFS kernel patches
         run: |
@@ -853,8 +855,9 @@ jobs:
           export KBUILD_BUILD_USER="builder"
           export KBUILD_BUILD_HOST="ci"
 
-          # Inject KSU/KPROBES directly into .config right after defconfig generation
-          export POST_DEFCONFIG_CMDS="cat << 'EOF' >> \${OUT_DIR}/.config
+          # Properly escaped config injection block using single quotes
+          export POST_DEFCONFIG_CMDS='cat << EOF >> ${OUT_DIR}/.config
+          CONFIG_MODULES=y
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
@@ -869,8 +872,14 @@ jobs:
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
-          EOF
-          "
+          EOF'
+
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+          USE_CCACHE=1 \
+          CCACHE_DIR="${{ env.CCACHE_DIR }}" \
+          build/build.sh -j"$(nproc)"
+
 
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
